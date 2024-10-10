@@ -2,5 +2,5 @@ Resources:
   MySG:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: New SG
+      GroupDescription: New SG Revision
       VpcId: vpc-07c0d9840bc1ec526
