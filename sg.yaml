@@ -1,6 +1,43 @@
-Resources:
-  MySG:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: New SG Revision
-      VpcId: vpc-07c0d9840bc1ec526
+#!/bin/bash
+# Usage: cfn-create-changeset <stack-name> <template-file>
+
+STACK=$1
+TEMPLATE=$2
+
+if [ -z "$STACK" ] || [ -z "$TEMPLATE" ]; then
+  echo "Usage: $0 <stack-name> <template-file>"
+  exit 1
+fi
+
+CHANGESET="changeset-$(date +%Y%m%d%H%M%S)"
+
+echo "Creating change set '$CHANGESET' for stack '$STACK'..."
+
+aws cloudformation create-change-set \
+  --stack-name "$STACK" \
+  --change-set-name "$CHANGESET" \
+  --template-body file://"$TEMPLATE" \
+  --parameters $(aws cloudformation describe-stacks \
+    --stack-name "$STACK" \
+    --query 'Stacks[0].Parameters[*].{ParameterKey:ParameterKey,UsePreviousValue:`true`}' \
+    --output json)
+
+echo ""
+echo "Waiting for change set to be ready..."
+aws cloudformation wait change-set-create-complete \
+  --stack-name "$STACK" \
+  --change-set-name "$CHANGESET"
+
+echo ""
+echo "Changes for stack '$STACK' (change set: $CHANGESET):"
+echo "------------------------------------------------------"
+aws cloudformation describe-change-set \
+  --stack-name "$STACK" \
+  --change-set-name "$CHANGESET" \
+  --query 'Changes[*].{Action:ResourceChange.Action,Resource:ResourceChange.LogicalResourceId,Type:ResourceChange.ResourceType,Replacement:ResourceChange.Replacement}' \
+  --output table
+
+echo ""
+echo "Change set name: $CHANGESET"
+echo "To execute: cfn-execute-changeset $STACK $CHANGESET"
+echo "To delete:  aws cloudformation delete-change-set --stack-name $STACK --change-set-name $CHANGESET"
