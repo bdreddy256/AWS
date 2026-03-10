@@ -1,30 +1,53 @@
 #!/bin/bash
-# Usage: cfn-create-changeset <stack-name> <template-file>
+# Usage: cfn-delete-changesets <stack-name>
 
 STACK=$1
-TEMPLATE=$2
-CHANGESET="changeset-$(date +%Y%m%d%H%M%S)"
 
-echo "Creating change set '$CHANGESET' for stack '$STACK'..."
+# Check argument
+if [ -z "$STACK" ]; then
+  echo "Usage: cfn-delete-changesets <stack-name>"
+  exit 1
+fi
 
-aws cloudformation create-change-set \
+# Check stack exists
+aws cloudformation describe-stacks --stack-name "$STACK" > /dev/null 2>&1
+if [ $? -ne 0 ]; then
+  echo "Error: Stack '$STACK' not found or you don't have access."
+  exit 1
+fi
+
+# Get all pending change sets
+CHANGESETS=$(aws cloudformation list-change-sets \
   --stack-name "$STACK" \
-  --change-set-name "$CHANGESET" \
-  --template-body file://"$TEMPLATE"
+  --query 'Summaries[*].ChangeSetName' \
+  --output text)
+
+# Check if any exist
+if [ -z "$CHANGESETS" ]; then
+  echo "No pending change sets found for stack '$STACK'."
+  exit 0
+fi
+
+COUNT=$(echo "$CHANGESETS" | wc -w)
+echo "Found $COUNT change set(s) for stack '$STACK'."
+echo ""
+
+# Delete each one
+SUCCESS=0
+FAILED=0
+for CHANGESET in $CHANGESETS; do
+  echo -n "Deleting: $CHANGESET ... "
+  aws cloudformation delete-change-set \
+    --stack-name "$STACK" \
+    --change-set-name "$CHANGESET" > /dev/null 2>&1
+  if [ $? -eq 0 ]; then
+    echo "OK"
+    SUCCESS=$((SUCCESS + 1))
+  else
+    echo "FAILED"
+    FAILED=$((FAILED + 1))
+  fi
+done
 
 echo ""
-echo "Waiting for change set to be ready..."
-aws cloudformation wait change-set-create-complete \
-  --stack-name "$STACK" \
-  --change-set-name "$CHANGESET"
-
-echo ""
-aws cloudformation describe-change-set \
-  --stack-name "$STACK" \
-  --change-set-name "$CHANGESET" \
-  --query 'Changes[*].{Action:ResourceChange.Action,Resource:ResourceChange.LogicalResourceId,Type:ResourceChange.ResourceType,Replacement:ResourceChange.Replacement}' \
-  --output table
-
-echo ""
-echo "Change set: $CHANGESET"
-echo "To execute: cfn-execute-changeset $STACK $CHANGESET"
+echo "Done. $SUCCESS deleted, $FAILED failed."
