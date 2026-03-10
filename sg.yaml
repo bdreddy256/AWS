@@ -1,43 +1,28 @@
 #!/bin/bash
-# Usage: cfn-create-changeset <stack-name> <template-file>
+# Usage: cfn-execute-changeset <stack-name> <changeset-name>
 
 STACK=$1
-TEMPLATE=$2
+CHANGESET=$2
 
-if [ -z "$STACK" ] || [ -z "$TEMPLATE" ]; then
-  echo "Usage: $0 <stack-name> <template-file>"
+if [ -z "$STACK" ] || [ -z "$CHANGESET" ]; then
+  echo "Usage: $0 <stack-name> <changeset-name>"
   exit 1
 fi
 
-CHANGESET="changeset-$(date +%Y%m%d%H%M%S)"
-
-echo "Creating change set '$CHANGESET' for stack '$STACK'..."
-
-aws cloudformation create-change-set \
-  --stack-name "$STACK" \
-  --change-set-name "$CHANGESET" \
-  --template-body file://"$TEMPLATE" \
-  --parameters $(aws cloudformation describe-stacks \
-    --stack-name "$STACK" \
-    --query 'Stacks[0].Parameters[*].{ParameterKey:ParameterKey,UsePreviousValue:`true`}' \
-    --output json)
-
-echo ""
-echo "Waiting for change set to be ready..."
-aws cloudformation wait change-set-create-complete \
+echo "Executing change set '$CHANGESET' on stack '$STACK'..."
+aws cloudformation execute-change-set \
   --stack-name "$STACK" \
   --change-set-name "$CHANGESET"
 
 echo ""
-echo "Changes for stack '$STACK' (change set: $CHANGESET):"
-echo "------------------------------------------------------"
-aws cloudformation describe-change-set \
-  --stack-name "$STACK" \
-  --change-set-name "$CHANGESET" \
-  --query 'Changes[*].{Action:ResourceChange.Action,Resource:ResourceChange.LogicalResourceId,Type:ResourceChange.ResourceType,Replacement:ResourceChange.Replacement}' \
-  --output table
+echo "Waiting for stack update to complete..."
+aws cloudformation wait stack-update-complete \
+  --stack-name "$STACK"
 
 echo ""
-echo "Change set name: $CHANGESET"
-echo "To execute: cfn-execute-changeset $STACK $CHANGESET"
-echo "To delete:  aws cloudformation delete-change-set --stack-name $STACK --change-set-name $CHANGESET"
+echo "Stack events:"
+echo "-------------"
+aws cloudformation describe-stack-events \
+  --stack-name "$STACK" \
+  --query 'StackEvents[*].{Time:Timestamp,Resource:LogicalResourceId,Status:ResourceStatus,Reason:ResourceStatusReason}' \
+  --output table
