@@ -3,35 +3,14 @@
 
 STACK=$1
 TEMPLATE=$2
-
-if [ -z "$STACK" ] || [ -z "$TEMPLATE" ]; then
-  echo "Usage: $0 <stack-name> <template-file>"
-  exit 1
-fi
-
 CHANGESET="changeset-$(date +%Y%m%d%H%M%S)"
-
-echo "Fetching existing parameters for stack '$STACK'..."
-PARAMS=$(aws cloudformation describe-stacks \
-  --stack-name "$STACK" \
-  --query 'Stacks[0].Parameters[*].{ParameterKey:ParameterKey,UsePreviousValue:`true`}' \
-  --output json)
-
-if [ -z "$PARAMS" ] || [ "$PARAMS" == "null" ] || [ "$PARAMS" == "[]" ]; then
-  echo "No existing parameters found, deploying without parameters..."
-  PARAM_ARGS=""
-else
-  echo "Found existing parameters, preserving all values..."
-  PARAM_ARGS="--parameters $PARAMS"
-fi
 
 echo "Creating change set '$CHANGESET' for stack '$STACK'..."
 
 aws cloudformation create-change-set \
   --stack-name "$STACK" \
   --change-set-name "$CHANGESET" \
-  --template-body file://"$TEMPLATE" \
-  $PARAM_ARGS
+  --template-body file://"$TEMPLATE"
 
 echo ""
 echo "Waiting for change set to be ready..."
@@ -40,8 +19,6 @@ aws cloudformation wait change-set-create-complete \
   --change-set-name "$CHANGESET"
 
 echo ""
-echo "Changes for stack '$STACK' (change set: $CHANGESET):"
-echo "------------------------------------------------------"
 aws cloudformation describe-change-set \
   --stack-name "$STACK" \
   --change-set-name "$CHANGESET" \
@@ -49,6 +26,5 @@ aws cloudformation describe-change-set \
   --output table
 
 echo ""
-echo "Change set name: $CHANGESET"
+echo "Change set: $CHANGESET"
 echo "To execute: cfn-execute-changeset $STACK $CHANGESET"
-echo "To delete:  aws cloudformation delete-change-set --stack-name $STACK --change-set-name $CHANGESET"
