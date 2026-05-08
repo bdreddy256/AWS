@@ -1,53 +1,16 @@
-#!/bin/bash
-# Usage: cfn-delete-changesets <stack-name>
+import boto3, sys
 
-STACK=$1
+def quick_check(stack_name):
+    def get_t(reg):
+        return boto3.client('cloudformation', reg).get_template(
+            StackName=stack_name, TemplateStage='Processed'
+        )['TemplateBody']
 
-# Check argument
-if [ -z "$STACK" ]; then
-  echo "Usage: cfn-delete-changesets <stack-name>"
-  exit 1
-fi
+    try:
+        match = get_t('us-east-1') == get_t('us-east-2')
+        print("✅ Match" if match else "❌ Mismatch")
+    except Exception as e:
+        print(f"Error: {e}")
 
-# Check stack exists
-aws cloudformation describe-stacks --stack-name "$STACK" > /dev/null 2>&1
-if [ $? -ne 0 ]; then
-  echo "Error: Stack '$STACK' not found or you don't have access."
-  exit 1
-fi
-
-# Get all pending change sets
-CHANGESETS=$(aws cloudformation list-change-sets \
-  --stack-name "$STACK" \
-  --query 'Summaries[*].ChangeSetName' \
-  --output text)
-
-# Check if any exist
-if [ -z "$CHANGESETS" ]; then
-  echo "No pending change sets found for stack '$STACK'."
-  exit 0
-fi
-
-COUNT=$(echo "$CHANGESETS" | wc -w)
-echo "Found $COUNT change set(s) for stack '$STACK'."
-echo ""
-
-# Delete each one
-SUCCESS=0
-FAILED=0
-for CHANGESET in $CHANGESETS; do
-  echo -n "Deleting: $CHANGESET ... "
-  aws cloudformation delete-change-set \
-    --stack-name "$STACK" \
-    --change-set-name "$CHANGESET" > /dev/null 2>&1
-  if [ $? -eq 0 ]; then
-    echo "OK"
-    SUCCESS=$((SUCCESS + 1))
-  else
-    echo "FAILED"
-    FAILED=$((FAILED + 1))
-  fi
-done
-
-echo ""
-echo "Done. $SUCCESS deleted, $FAILED failed."
+if __name__ == "__main__":
+    quick_check(sys.argv[1])
