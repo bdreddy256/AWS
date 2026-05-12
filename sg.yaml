@@ -6,16 +6,28 @@ sgs = {sg['GroupId']: sg['GroupName']
        for sg in ec2.describe_security_groups()['SecurityGroups']
        if sg['GroupName'] != 'default'}
 
+# SGs attached to ENIs
 used, eni_status = set(), {}
 for eni in ec2.describe_network_interfaces()['NetworkInterfaces']:
     for g in eni['Groups']:
         used.add(g['GroupId'])
         eni_status.setdefault(g['GroupId'], []).append(eni['Status'])
 
+# SGs referenced by other SGs' rules
+referenced = {}  # referenced_sg -> [referencing_sgs]
+for sg in ec2.describe_security_groups()['SecurityGroups']:
+    for rule in sg.get('IpPermissions', []) + sg.get('IpPermissionsEgress', []):
+        for pair in rule.get('UserIdGroupPairs', []):
+            ref = pair.get('GroupId')
+            if ref and ref != sg['GroupId']:
+                referenced.setdefault(ref, []).append(sg['GroupId'])
+
 print("Not attached to any ENI:")
 for gid, name in sgs.items():
     if gid not in used:
-        print(f"  {gid} ({name})")
+        refs = referenced.get(gid)
+        tag = f" [referenced by: {', '.join(refs)}]" if refs else ""
+        print(f"  {gid} ({name}){tag}")
 
 print("\nAttached only to 'available' ENIs:")
 for gid, statuses in eni_status.items():
