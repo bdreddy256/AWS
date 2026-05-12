@@ -1,16 +1,23 @@
-import boto3, sys
+import boto3
 
-def quick_check(stack_name):
-    def get_t(reg):
-        return boto3.client('cloudformation', reg).get_template(
-            StackName=stack_name, TemplateStage='Processed'
-        )['TemplateBody']
+ec2 = boto3.client('ec2')
 
-    try:
-        match = get_t('us-east-1') == get_t('us-east-2')
-        print("✅ Match" if match else "❌ Mismatch")
-    except Exception as e:
-        print(f"Error: {e}")
+sgs = {sg['GroupId']: sg['GroupName']
+       for sg in ec2.describe_security_groups()['SecurityGroups']
+       if sg['GroupName'] != 'default'}
 
-if __name__ == "__main__":
-    quick_check(sys.argv[1])
+used, eni_status = set(), {}
+for eni in ec2.describe_network_interfaces()['NetworkInterfaces']:
+    for g in eni['Groups']:
+        used.add(g['GroupId'])
+        eni_status.setdefault(g['GroupId'], []).append(eni['Status'])
+
+print("Not attached to any ENI:")
+for gid, name in sgs.items():
+    if gid not in used:
+        print(f"  {gid} ({name})")
+
+print("\nAttached only to 'available' ENIs:")
+for gid, statuses in eni_status.items():
+    if gid in sgs and all(s == 'available' for s in statuses):
+        print(f"  {gid} ({sgs[gid]})")
