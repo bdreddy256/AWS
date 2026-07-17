@@ -1,35 +1,24 @@
-import boto3
+import ssl, urllib.parse, urllib.request
+import xml.etree.ElementTree as ET
 
-ec2 = boto3.client('ec2')
+HOST = "10.0.0.9"      # <-- your Panorama IP/FQDN
+APIKEY = "PASTE_KEY"   # <-- your superreader key
 
-sgs = {sg['GroupId']: sg['GroupName']
-       for sg in ec2.describe_security_groups()['SecurityGroups']
-       if sg['GroupName'] != 'default'}
+ctx = ssl.create_default_context()
+ctx.check_hostname = False
+ctx.verify_mode = ssl.CERT_NONE   # mgmt cert is usually self-signed
 
-# SGs attached to ENIs
-used, eni_status = set(), {}
-for eni in ec2.describe_network_interfaces()['NetworkInterfaces']:
-    for g in eni['Groups']:
-        used.add(g['GroupId'])
-        eni_status.setdefault(g['GroupId'], []).append(eni['Status'])
+# Ask Panorama for its connected managed devices
+params = {"type": "op",
+          "cmd": "<show><devices><connected></connected></devices></show>",
+          "key": APIKEY}
+url = f"https://{HOST}/api/?" + urllib.parse.urlencode(params)
 
-# SGs referenced by other SGs' rules
-referenced = {}  # referenced_sg -> [referencing_sgs]
-for sg in ec2.describe_security_groups()['SecurityGroups']:
-    for rule in sg.get('IpPermissions', []) + sg.get('IpPermissionsEgress', []):
-        for pair in rule.get('UserIdGroupPairs', []):
-            ref = pair.get('GroupId')
-            if ref and ref != sg['GroupId']:
-                referenced.setdefault(ref, []).append(sg['GroupId'])
+with urllib.request.urlopen(urllib.request.Request(url), context=ctx, timeout=15) as r:
+    root = ET.fromstring(r.read())
 
-print("Not attached to any ENI:")
-for gid, name in sgs.items():
-    if gid not in used:
-        refs = referenced.get(gid)
-        tag = f" [referenced by: {', '.join(refs)}]" if refs else ""
-        print(f"  {gid} ({name}){tag}")
-
-print("\nAttached only to 'available' ENIs:")
-for gid, statuses in eni_status.items():
-    if gid in sgs and all(s == 'available' for s in statuses):
-        print(f"  {gid} ({sgs[gid]})")
+print("API status:", root.get("status"))
+devs = root.findall(".//devices/entry")
+print(f"Connected devices: {len(devs)}")
+for e in devs[:5]:
+    print(" -", e.findtext("hostname"), e.get("name"))
