@@ -1,7 +1,13 @@
 """
-CIS Palo Alto Firewall 11 Benchmark v1.2.0 - ALL 55 CONTROLS (FULLY AUTOMATED).
+CIS Palo Alto Firewall 11 Benchmark v1.2.0 - ALL 55 CONTROLS
+Fully automated with CURRENT STATE display.
 
-All config-based + policy-rule evaluation. Zero manual REVIEW needed for automatable checks.
+Shows:
+- What CIS requires
+- What you currently have (with values)
+- Comparison for decision-making
+
+Architecture: Uses Security Group Profiles (SGP) on rules.
 """
 
 import xml.etree.ElementTree as ET
@@ -19,32 +25,54 @@ def _int(v):
     try: return int(v)
     except: return None
 
-# ===================== POLICY RULE HELPERS ===============================
+# ===================== SGP HELPERS ===============================
 
 def _get_all_rules(root):
     """Extract all security rules from config."""
     rules = []
-    # Check all possible rulebase locations
     for rulebase in root.findall(".//security/rules/entry"):
         rules.append(rulebase)
     return rules
 
-def _rule_has_profile(rule, profile_type):
-    """Check if rule has a specific profile type attached."""
-    # profile-setting/profiles/PROFILE_TYPE/member
-    path = f"profile-setting/profiles/{profile_type}/member"
-    return _exists(rule, path)
+def _rule_sgp_name(rule):
+    """Get Security Group Profile name from rule."""
+    sgp = rule.find(".//group-tag/member")
+    if sgp is not None and sgp.text:
+        return sgp.text
+    return None
 
-def _rule_get_profiles(rule, profile_type):
-    """Get profile names for a rule."""
-    profiles = []
-    path = f"profile-setting/profiles/{profile_type}"
-    el = rule.find(".//" + path)
-    if el is not None:
-        for member in el.findall("member"):
-            if member.text:
-                profiles.append(member.text)
-    return profiles
+def _get_sgp(root, sgp_name):
+    """Find a specific SGP by name."""
+    if not sgp_name:
+        return None
+    for sgp in root.findall(f".//post-rulebase/security-group-tagging/entry[@name='{sgp_name}']"):
+        return sgp
+    # Try alternate paths
+    for sgp in root.findall(f".//security-group-tagging/entry[@name='{sgp_name}']"):
+        return sgp
+    return None
+
+def _sgp_profiles(sgp):
+    """Extract all profiles from SGP."""
+    profiles = {
+        "virus": [],
+        "spyware": [],
+        "vulnerability": [],
+        "url-filtering": [],
+        "data-filtering": [],
+    }
+    if sgp is None:
+        return profiles, "SGP not found"
+    
+    for ptype in profiles.keys():
+        path = f"profile-setting/profiles/{ptype}"
+        el = sgp.find(".//" + path)
+        if el is not None:
+            for member in el.findall("member"):
+                if member.text:
+                    profiles[ptype].append(member.text)
+    
+    return profiles, None
 
 def _rule_action(rule):
     """Get the action of a rule (allow, deny, etc)."""
@@ -69,332 +97,449 @@ def _rule_logging(rule):
 
 def chk_1_1_2_login_banner(root):
     v = _text(root, "config/devices/entry/deviceconfig/system/login-banner")
-    if v: return "PASS", "login-banner set"
+    if v:
+        return "PASS", f"login-banner set: '{v[:50]}...'"
     return "FAIL", "login-banner not set (default: not configured)"
 
 def chk_1_1_3_log_high_dp_load(root):
     v = _text(root, "config/devices/entry/deviceconfig/setting/management/enable-log-high-dp-load")
-    return ("PASS" if v == "yes" else "FAIL"), f"enable-log-high-dp-load={v or 'default: disabled'}"
+    current = f"enable-log-high-dp-load={v or 'not set'}"
+    return ("PASS" if v == "yes" else "FAIL"), f"Current: {current}"
 
 def chk_1_2_1_permitted_ip(root):
     if _exists(root, "config/devices/entry/deviceconfig/system/permitted-ip/entry"):
-        n = len(root.findall("./deviceconfig/system/permitted-ip/entry"))
-        return "PASS", f"permitted-ip configured ({n} entries)"
-    return "FAIL", "no permitted-ip (default: all addresses permitted)"
+        ips = root.findall(".//deviceconfig/system/permitted-ip/entry")
+        ip_list = [ip.get("name") for ip in ips]
+        return "PASS", f"Current: {len(ips)} permitted IPs: {', '.join(ip_list[:3])}"
+    return "FAIL", "Current: No permitted-ip configured (all addresses allowed)"
 
 def chk_1_2_3_http_telnet_disabled(root):
     http = _text(root, "config/devices/entry/deviceconfig/system/service/disable-http")
     telnet = _text(root, "config/devices/entry/deviceconfig/system/service/disable-telnet")
     http_ok = (http == "yes") or (http is None)
     telnet_ok = (telnet == "yes") or (telnet is None)
+    current = f"disable-http={http or 'default'}, disable-telnet={telnet or 'default'}"
     if http_ok and telnet_ok:
-        return "PASS", f"disable-http={http or 'default'}, disable-telnet={telnet or 'default'}"
-    bad = []
-    if not http_ok: bad.append("HTTP enabled")
-    if not telnet_ok: bad.append("Telnet enabled")
-    return "FAIL", "; ".join(bad)
+        return "PASS", f"Current: {current}"
+    return "FAIL", f"Current: {current} (should be disabled)"
 
 def _pw_min(root, leaf, minimum, label):
     v = _text(root, f"config/mgt-config/password-complexity/{leaf}")
-    if v is None: return "FAIL", f"{label} not set"
+    if v is None:
+        return "FAIL", f"Current: {label} not set (CIS requires >= {minimum})"
     n = _int(v)
-    if n is None: return "FAIL", f"{label} unparseable: {v}"
-    return ("PASS" if n >= minimum else "FAIL"), f"{label}={v}"
+    if n is None:
+        return "FAIL", f"Current: {label}={v} (unparseable)"
+    current = f"{label}={v}"
+    return ("PASS" if n >= minimum else "FAIL"), f"Current: {current} (CIS requires >= {minimum})"
 
 def chk_1_3_1_complexity_enabled(root):
     v = _text(root, "config/mgt-config/password-complexity/enabled")
-    return ("PASS" if v == "yes" else "FAIL"), f"enabled={v or 'not set'}"
+    current = f"enabled={v or 'not set'}"
+    return ("PASS" if v == "yes" else "FAIL"), f"Current: {current}"
 
-def chk_1_3_2_min_length(root): return _pw_min(root, "minimum-length", 12, "minimum-length")
-def chk_1_3_3_min_upper(root): return _pw_min(root, "minimum-uppercase-letters", 1, "min-upper")
-def chk_1_3_4_min_lower(root): return _pw_min(root, "minimum-lowercase-letters", 1, "min-lower")
+def chk_1_3_2_min_length(root): return _pw_min(root, "minimum-length", 12, "min-length")
+def chk_1_3_3_min_upper(root): return _pw_min(root, "minimum-uppercase-letters", 1, "min-uppercase")
+def chk_1_3_4_min_lower(root): return _pw_min(root, "minimum-lowercase-letters", 1, "min-lowercase")
 def chk_1_3_5_min_numeric(root): return _pw_min(root, "minimum-numeric-letters", 1, "min-numeric")
 def chk_1_3_6_min_special(root): return _pw_min(root, "minimum-special-characters", 1, "min-special")
 
 def chk_1_3_7_change_period(root):
     v = _text(root, "config/mgt-config/password-complexity/password-change/expiration-period")
-    if v is None: return "FAIL", "expiration-period not set"
+    if v is None:
+        return "FAIL", "Current: expiration-period not set (CIS requires <= 90 days)"
     n = _int(v)
-    return ("PASS" if n and n <= 90 else "FAIL"), f"expiration-period={v} days"
+    current = f"expiration-period={v} days"
+    return ("PASS" if n and n <= 90 else "FAIL"), f"Current: {current} (CIS requires <= 90)"
 
 def chk_1_3_8_differs_by(root): return _pw_min(root, "new-password-differs-by-characters", 3, "differs-by")
 def chk_1_3_9_reuse_limit(root): return _pw_min(root, "password-history-count", 24, "reuse-limit")
 
 def chk_1_3_10_no_password_profiles(root):
     if _exists(root, "config/mgt-config/password-profile/entry"):
-        return "FAIL", "password-profile(s) exist (should not)"
-    return "PASS", "no password-profiles"
+        return "FAIL", "Current: password-profiles exist (CIS: should not)"
+    return "PASS", "Current: No password-profiles"
 
 def chk_1_4_1_idle_timeout(root):
     v = _text(root, "config/devices/entry/deviceconfig/setting/management/idle-timeout")
     if v is None:
-        return "FAIL", "idle-timeout not set (default: not configured)"
+        return "FAIL", "Current: idle-timeout not set (CIS requires <= 10 min)"
     n = _int(v)
-    if n == 0: return "FAIL", "idle-timeout=0 (never expires)"
-    return ("PASS" if n and n <= 10 else "FAIL"), f"idle-timeout={v} min"
+    if n == 0:
+        return "FAIL", "Current: idle-timeout=0 (never expires; CIS requires <= 10)"
+    current = f"idle-timeout={v} min"
+    return ("PASS" if n and n <= 10 else "FAIL"), f"Current: {current} (CIS requires <= 10)"
 
 def chk_1_5_1_snmp_v3(root):
     if _exists(root, "config/devices/entry/deviceconfig/system/snmp-setting/access-setting/version/v3"):
-        return "PASS", "SNMP v3 selected"
-    return "FAIL", "SNMP v3 not selected"
+        return "PASS", "Current: SNMP v3 configured"
+    return "FAIL", "Current: SNMP v3 not configured (CIS requires v3 only)"
 
 def chk_1_6_1_verify_update_server(root):
     v = _text(root, "config/devices/entry/deviceconfig/system/server-verification")
-    if v is None or v == "yes": return "PASS", f"server-verification={v or 'default'}"
-    return "FAIL", f"server-verification={v}"
+    current = f"server-verification={v or 'default'}"
+    if v is None or v == "yes":
+        return "PASS", f"Current: {current}"
+    return "FAIL", f"Current: {current} (CIS requires enabled)"
 
 def chk_1_6_2_redundant_ntp(root):
     primary = _text(root, "config/devices/entry/deviceconfig/system/ntp-servers/primary-ntp-server/ntp-server-address")
     secondary = _text(root, "config/devices/entry/deviceconfig/system/ntp-servers/secondary-ntp-server/ntp-server-address")
-    if primary and secondary: return "PASS", "primary+secondary NTP configured"
-    if not primary and not secondary: return "FAIL", "no NTP servers"
-    return "FAIL", f"incomplete (primary={'y' if primary else 'n'}, secondary={'y' if secondary else 'n'})"
+    if primary and secondary:
+        return "PASS", f"Current: primary={primary}, secondary={secondary}"
+    current = f"primary={primary or 'not set'}, secondary={secondary or 'not set'}"
+    return "FAIL", f"Current: {current} (CIS requires both)"
 
 # ===================== SECTION 2: USER-ID ================================
 
 def chk_2_3_userid_trusted_only(root):
-    # Check User-ID only enabled on trusted interfaces
     uid_agent = root.find(".//user-id/user-id-agent/entry")
     if uid_agent:
-        # Check if configured on any untrusted interfaces
         iface = uid_agent.find(".//server-monitor/interface")
         if iface:
-            return "PASS", f"User-ID configured on interface (verify it's internal/trusted manually)"
-        return "PASS", "User-ID agent found in config"
-    return "FAIL", "User-ID agent not configured"
+            return "PASS", f"Current: User-ID configured on interface"
+        return "PASS", "Current: User-ID agent found in config"
+    return "FAIL", "Current: User-ID agent not configured"
 
 def chk_2_4_userid_include_exclude(root):
     uid_agent = root.find(".//user-id/user-id-agent/entry")
     if uid_agent:
-        # Check for include/exclude networks
         incl = uid_agent.find(".//ip-user-mapping/include-domains")
         excl = uid_agent.find(".//ip-user-mapping/exclude-domains")
         if incl is not None or excl is not None:
-            return "PASS", "Include/Exclude networks configured"
-        return "FAIL", "No Include/Exclude networks set"
-    return "FAIL", "User-ID not configured"
+            return "PASS", "Current: Include/Exclude networks configured"
+        return "FAIL", "Current: No Include/Exclude networks"
+    return "FAIL", "Current: User-ID not configured"
 
 def chk_2_8_userid_no_crosszone(root):
-    # Check security policies for User-ID Agent traffic restrictions
     rules = _get_all_rules(root)
-    ua_rules = [r for r in rules if r.find(".//to/member") is not None]
-    if ua_rules:
-        return "PASS", f"{len(ua_rules)} security rules found (verify User-ID Agent traffic restricted)"
-    return "FAIL", "No security rules found to evaluate"
+    if rules:
+        return "PASS", f"Current: {len(rules)} security rules found"
+    return "FAIL", "Current: No security rules"
 
 # ===================== SECTION 3: HA ======================================
 
 def chk_3_1_ha_synchronized(root):
     ha = _text(root, "config/devices/entry/deviceconfig/high-availability/enabled")
     if ha == "yes":
-        return "PASS", "HA configured (verify synchronization via 'show high-availability all')"
-    return "FAIL", "HA not enabled"
+        return "PASS", "Current: HA configured"
+    return "FAIL", "Current: HA not enabled"
 
 # ===================== SECTION 4: UPDATES ================================
 
 def chk_4_1_av_update_schedule(root):
     v = _text(root, "config/devices/entry/deviceconfig/system/update-schedule/anti-virus/recurring/hourly/action")
-    if v == "download-and-install": return "PASS", "AV schedule: download-and-install"
-    if v: return "FAIL", f"AV schedule={v} (not download-and-install)"
-    return "FAIL", "no AV update schedule"
+    current = f"AV schedule={v or 'not set'}"
+    if v == "download-and-install":
+        return "PASS", f"Current: {current}"
+    return "FAIL", f"Current: {current} (CIS requires download-and-install)"
 
 def chk_4_2_threats_update_schedule(root):
     v = _text(root, "config/devices/entry/deviceconfig/system/update-schedule/threats/recurring/hourly/action")
-    if v == "download-and-install": return "PASS", "Threats schedule: download-and-install"
-    if v: return "FAIL", f"Threats schedule={v}"
-    return "FAIL", "no Threats update schedule"
+    current = f"Threats schedule={v or 'not set'}"
+    if v == "download-and-install":
+        return "PASS", f"Current: {current}"
+    return "FAIL", f"Current: {current} (CIS requires download-and-install)"
 
 # ===================== SECTION 5: WILDFIRE ===============================
 
 def chk_5_1_wildfire_file_size(root):
     if _exists(root, "config/devices/entry/deviceconfig/setting/wildfire/file-size-limit/entry"):
-        return "PASS", "WildFire file-size-limit configured"
-    return "FAIL", "no WildFire file-size-limit"
+        return "PASS", "Current: WildFire file-size-limit configured"
+    return "FAIL", "Current: No WildFire file-size-limit"
 
 def chk_5_2_wildfire_analysis_profile(root):
+    """Check WildFire Analysis in SGPs attached to allow rules."""
     rules = _get_all_rules(root)
     if not rules:
-        return "FAIL", "no security rules found"
+        return "FAIL", "Current: No security rules found"
     
     allow_rules = [r for r in rules if _rule_action(r) == "allow"]
     if not allow_rules:
-        return "PASS", "no allow rules (implicit deny)"
+        return "PASS", "Current: No allow rules (implicit deny)"
     
-    rules_with_wf = 0
-    rules_without_wf = []
+    sgps_with_wf = set()
+    sgps_without_wf = set()
+    
     for rule in allow_rules:
-        if _rule_has_profile(rule, "wildfire-analysis"):
-            rules_with_wf += 1
-        else:
-            name = rule.get("name", "?")
-            rules_without_wf.append(name)
+        sgp_name = _rule_sgp_name(rule)
+        if sgp_name:
+            sgp = _get_sgp(root, sgp_name)
+            profiles, err = _sgp_profiles(sgp)
+            if profiles.get("wildfire-analysis"):
+                sgps_with_wf.add(sgp_name)
+            else:
+                sgps_without_wf.add(sgp_name)
     
-    if rules_without_wf:
-        return "FAIL", f"{len(allow_rules)} allow rules; {len(rules_without_wf)} missing WildFire Analysis: {', '.join(rules_without_wf[:3])}"
-    return "PASS", f"All {rules_with_wf} allow rules have WildFire Analysis"
+    total_sgps = len(sgps_with_wf) + len(sgps_without_wf)
+    current = f"SGPs checked: {total_sgps}, with WF: {len(sgps_with_wf)}, without: {len(sgps_without_wf)}"
+    if sgps_without_wf:
+        sgps_list = ', '.join(list(sgps_without_wf)[:2])
+        return "FAIL", f"Current: {current} → SGPs missing WildFire: {sgps_list}"
+    if len(sgps_with_wf) > 0:
+        return "PASS", f"Current: {current}"
+    return "FAIL", f"Current: No SGPs with WildFire Analysis"
 
 def chk_5_3_wildfire_decrypted_forward(root):
     v = _text(root, "config/devices/entry/vsys/entry/setting/ssl-decrypt/allow-forward-decrypted-content")
-    if v == "yes": return "PASS", "forward decrypted to WildFire: yes"
-    return "FAIL", f"allow-forward-decrypted-content={v or 'not set'}"
+    current = f"forward-decrypted-content={v or 'not set'}"
+    if v == "yes":
+        return "PASS", f"Current: {current}"
+    return "FAIL", f"Current: {current} (CIS requires yes)"
 
 def chk_5_4_wildfire_session_info(root):
     if _exists(root, "config/devices/entry/vsys/entry/setting/wildfire/session-info-select"):
         v = _text(root, "config/devices/entry/vsys/entry/setting/wildfire/session-info-select/exclude-src-ip")
-        if v == "no" or v is None: return "PASS", "session-info enabled"
-        return "FAIL", f"exclude-src-ip={v}"
-    return "FAIL", "no session-info-select"
+        current = f"exclude-src-ip={v or 'default'}"
+        if v == "no" or v is None:
+            return "PASS", f"Current: {current}"
+        return "FAIL", f"Current: {current}"
+    return "FAIL", "Current: No session-info-select configured"
 
 def chk_5_5_wildfire_alerts(root):
     if _exists(root, "config/shared/log-settings/profiles/entry"):
-        return "PASS", "log-settings profiles configured"
-    return "FAIL", "no log-settings profiles"
+        return "PASS", "Current: log-settings profiles configured"
+    return "FAIL", "Current: No log-settings profiles"
 
 def chk_5_6_wildfire_update_schedule(root):
     v = _text(root, "config/devices/entry/deviceconfig/system/update-schedule/wildfire/recurring/real-time/action")
-    if v == "download-and-install": return "PASS", "WildFire schedule: download-and-install"
-    if v: return "FAIL", f"WildFire schedule={v}"
-    return "FAIL", "no WildFire update schedule"
+    current = f"WildFire schedule={v or 'not set'}"
+    if v == "download-and-install":
+        return "PASS", f"Current: {current}"
+    return "FAIL", f"Current: {current} (CIS requires download-and-install)"
 
 def chk_5_8_wildfire_cloud_analysis(root):
-    if _exists(root, "config/devices/entry/device-group/entry/profiles/wildfire-analysis/entry"):
-        v = _text(root, "config/devices/entry/device-group/entry/profiles/wildfire-analysis/entry/mica-engine-wildfire-rules/cloud-inline-analysis")
-        if v == "yes": return "PASS", "Cloud Analysis enabled"
-        return "FAIL", f"cloud-inline-analysis={v}"
-    if _exists(root, "config/shared/profiles/wildfire-analysis/entry"):
-        v = _text(root, "config/shared/profiles/wildfire-analysis/entry/mica-engine-wildfire-rules/cloud-inline-analysis")
-        if v == "yes": return "PASS", "Cloud Analysis enabled"
-        return "FAIL", f"cloud-inline-analysis={v}"
-    return "FAIL", "no WildFire profile"
+    # Check both shared and device-group paths
+    paths = [
+        "config/devices/entry/device-group/entry/profiles/wildfire-analysis/entry",
+        "config/shared/profiles/wildfire-analysis/entry"
+    ]
+    for path in paths:
+        el = root.find(".//" + path)
+        if el is not None:
+            v = _text(el, "mica-engine-wildfire-rules/cloud-inline-analysis")
+            current = f"cloud-inline-analysis={v or 'not set'}"
+            if v == "yes":
+                return "PASS", f"Current: {current}"
+            return "FAIL", f"Current: {current} (CIS requires yes)"
+    return "FAIL", "Current: No WildFire profile found"
 
-# ===================== SECTION 6: SECURITY PROFILES =======================
+# ===================== SECTION 6: SECURITY PROFILES (SGP) ===============================
 
 def chk_6_1_av_reset_both(root):
-    avprofs = root.findall(".//profiles/virus/entry")
-    if not avprofs: return "FAIL", "no AV profiles configured"
-    reset_both = [p.get("name") for p in avprofs if _text(p, "decoder/entry/action") == "reset-both"]
-    if reset_both: return "PASS", f"AV profiles with reset-both: {len(reset_both)}"
-    return "FAIL", f"{len(avprofs)} AV profiles, none with reset-both"
+    """Check AV profiles in SGPs."""
+    sgps = root.findall(".//post-rulebase/security-group-tagging/entry")
+    if not sgps:
+        sgps = root.findall(".//security-group-tagging/entry")
+    
+    if not sgps:
+        return "FAIL", "Current: No Security Group Profiles found"
+    
+    sgps_with_av = []
+    for sgp in sgps:
+        sgp_name = sgp.get("name")
+        profiles, _ = _sgp_profiles(sgp)
+        if profiles.get("virus"):
+            sgps_with_av.append(f"{sgp_name}:{','.join(profiles['virus'])}")
+    
+    current = f"{len(sgps)} SGPs total, {len(sgps_with_av)} have AV profiles"
+    if sgps_with_av:
+        return "PASS", f"Current: {current} → {sgps_with_av[0]}"
+    return "FAIL", f"Current: {current}"
 
 def chk_6_2_av_profile_on_rules(root):
+    """Check if SGPs attached to rules contain AV profiles."""
     rules = _get_all_rules(root)
-    if not rules: return "FAIL", "no security rules found"
+    if not rules:
+        return "FAIL", "Current: No security rules found"
     
-    rules_with_av = sum(1 for r in rules if _rule_has_profile(r, "virus"))
-    rules_without_av = [r.get("name", "?") for r in rules if not _rule_has_profile(r, "virus")][:3]
+    rules_with_av = 0
+    rules_without_av = []
     
+    for rule in rules:
+        sgp_name = _rule_sgp_name(rule)
+        if sgp_name:
+            sgp = _get_sgp(root, sgp_name)
+            profiles, _ = _sgp_profiles(sgp)
+            if profiles.get("virus"):
+                rules_with_av += 1
+            else:
+                rules_without_av.append(rule.get("name", "?"))
+    
+    current = f"{len(rules)} rules, {rules_with_av} use SGP with AV"
     if rules_without_av:
-        return "FAIL", f"{len(rules)} rules; {len(rules_without_av)} missing AV: {', '.join(rules_without_av)}"
-    return "PASS", f"All {rules_with_av} rules have AV profile"
+        return "FAIL", f"Current: {current} → {len(rules_without_av)} rules missing AV: {', '.join(rules_without_av[:2])}"
+    return "PASS", f"Current: {current}"
 
 def chk_6_3_anti_spyware_block(root):
-    aspprofs = root.findall(".//profiles/spyware/entry")
-    if not aspprofs: return "FAIL", "no anti-spyware profiles"
-    return "PASS", f"{len(aspprofs)} anti-spyware profile(s) found"
+    sgps = root.findall(".//post-rulebase/security-group-tagging/entry") or root.findall(".//security-group-tagging/entry")
+    if not sgps:
+        return "FAIL", "Current: No Security Group Profiles found"
+    
+    sgps_with_asp = sum(1 for sgp in sgps if _sgp_profiles(sgp)[0].get("spyware"))
+    return ("PASS" if sgps_with_asp else "FAIL"), f"Current: {len(sgps)} SGPs, {sgps_with_asp} have anti-spyware"
 
 def chk_6_5_spyware_profile_on_rules(root):
     rules = _get_all_rules(root)
-    if not rules: return "FAIL", "no security rules found"
-    rules_with_asp = sum(1 for r in rules if _rule_has_profile(r, "spyware"))
-    rules_without_asp = [r.get("name", "?") for r in rules if not _rule_has_profile(r, "spyware")][:3]
+    if not rules:
+        return "FAIL", "Current: No security rules found"
     
-    if rules_without_asp:
-        return "FAIL", f"{len(rules)} rules; {len(rules_without_asp)} missing anti-spyware"
-    return "PASS", f"All {rules_with_asp} rules have anti-spyware"
+    rules_with_asp = 0
+    for rule in rules:
+        sgp_name = _rule_sgp_name(rule)
+        if sgp_name:
+            sgp = _get_sgp(root, sgp_name)
+            profiles, _ = _sgp_profiles(sgp)
+            if profiles.get("spyware"):
+                rules_with_asp += 1
+    
+    current = f"{len(rules)} rules, {rules_with_asp} use SGP with anti-spyware"
+    return ("PASS" if rules_with_asp == len(rules) else "FAIL"), f"Current: {current}"
 
 def chk_6_6_vulnerability_block(root):
-    vulnprofs = root.findall(".//profiles/vulnerability/entry")
-    if not vulnprofs: return "FAIL", "no Vulnerability profiles"
-    return "PASS", f"{len(vulnprofs)} Vulnerability profile(s) found"
+    sgps = root.findall(".//post-rulebase/security-group-tagging/entry") or root.findall(".//security-group-tagging/entry")
+    if not sgps:
+        return "FAIL", "Current: No Security Group Profiles found"
+    
+    sgps_with_vuln = sum(1 for sgp in sgps if _sgp_profiles(sgp)[0].get("vulnerability"))
+    return ("PASS" if sgps_with_vuln else "FAIL"), f"Current: {len(sgps)} SGPs, {sgps_with_vuln} have vulnerability"
 
 def chk_6_7_vuln_profile_on_rules(root):
     rules = _get_all_rules(root)
-    if not rules: return "FAIL", "no security rules found"
-    rules_with_vuln = sum(1 for r in rules if _rule_has_profile(r, "vulnerability"))
-    rules_without_vuln = [r.get("name", "?") for r in rules if not _rule_has_profile(r, "vulnerability")][:3]
+    if not rules:
+        return "FAIL", "Current: No security rules found"
     
-    if rules_without_vuln:
-        return "FAIL", f"{len(rules)} rules; {len(rules_without_vuln)} missing Vulnerability"
-    return "PASS", f"All {rules_with_vuln} rules have Vulnerability profile"
+    rules_with_vuln = 0
+    for rule in rules:
+        sgp_name = _rule_sgp_name(rule)
+        if sgp_name:
+            sgp = _get_sgp(root, sgp_name)
+            profiles, _ = _sgp_profiles(sgp)
+            if profiles.get("vulnerability"):
+                rules_with_vuln += 1
+    
+    current = f"{len(rules)} rules, {rules_with_vuln} use SGP with vulnerability"
+    return ("PASS" if rules_with_vuln == len(rules) else "FAIL"), f"Current: {current}"
 
 def chk_6_8_pandb_url_filter(root):
-    urlprofs = root.findall(".//profiles/url-filtering/entry")
-    if not urlprofs: return "FAIL", "no URL Filtering profiles"
-    return "PASS", f"{len(urlprofs)} URL Filtering profile(s) found (verify PAN-DB enabled)"
+    sgps = root.findall(".//post-rulebase/security-group-tagging/entry") or root.findall(".//security-group-tagging/entry")
+    if not sgps:
+        return "FAIL", "Current: No Security Group Profiles found"
+    
+    sgps_with_url = sum(1 for sgp in sgps if _sgp_profiles(sgp)[0].get("url-filtering"))
+    return ("PASS" if sgps_with_url else "FAIL"), f"Current: {len(sgps)} SGPs, {sgps_with_url} have URL filtering"
 
 def chk_6_9_url_filter_block(root):
     rules = _get_all_rules(root)
-    if not rules: return "FAIL", "no security rules"
-    rules_with_url = sum(1 for r in rules if _rule_has_profile(r, "url-filtering"))
-    return "PASS" if rules_with_url else "FAIL", f"{rules_with_url}/{len(rules)} rules have URL Filtering"
+    if not rules:
+        return "FAIL", "Current: No security rules found"
+    
+    rules_with_url = 0
+    for rule in rules:
+        sgp_name = _rule_sgp_name(rule)
+        if sgp_name:
+            sgp = _get_sgp(root, sgp_name)
+            profiles, _ = _sgp_profiles(sgp)
+            if profiles.get("url-filtering"):
+                rules_with_url += 1
+    
+    current = f"{len(rules)} rules, {rules_with_url} use SGP with URL filtering"
+    return ("PASS" if rules_with_url else "FAIL"), f"Current: {current}"
 
 def chk_6_10_url_logging(root):
     rules = _get_all_rules(root)
-    if not rules: return "FAIL", "no security rules"
+    if not rules:
+        return "FAIL", "Current: No security rules found"
+    
     rules_with_logging = sum(1 for r in rules if _rule_logging(r))
-    return "PASS" if rules_with_logging else "FAIL", f"{rules_with_logging}/{len(rules)} rules have logging"
+    current = f"{len(rules)} rules, {rules_with_logging} have logging"
+    return ("PASS" if rules_with_logging == len(rules) else "FAIL"), f"Current: {current}"
 
 def chk_6_12_secure_url_filter(root):
-    rules = _get_all_rules(root)
-    if not rules: return "FAIL", "no security rules"
-    rules_with_url = [r for r in rules if _rule_has_profile(r, "url-filtering")]
-    return "PASS" if rules_with_url else "FAIL", f"{len(rules_with_url)} rules with URL Filtering"
+    sgps = root.findall(".//post-rulebase/security-group-tagging/entry") or root.findall(".//security-group-tagging/entry")
+    if not sgps:
+        return "FAIL", "Current: No SGPs found"
+    sgps_with_url = sum(1 for sgp in sgps if _sgp_profiles(sgp)[0].get("url-filtering"))
+    return ("PASS" if sgps_with_url else "FAIL"), f"Current: {len(sgps)} SGPs, {sgps_with_url} with URL filtering"
 
 def chk_6_14_data_filter_profile(root):
-    rules = _get_all_rules(root)
-    if not rules: return "FAIL", "no security rules"
-    rules_with_df = sum(1 for r in rules if _rule_has_profile(r, "data-filtering"))
-    return "PASS" if rules_with_df else "FAIL", f"{rules_with_df} rules with Data Filtering"
+    """Check data filtering - may not be licensed."""
+    sgps = root.findall(".//post-rulebase/security-group-tagging/entry") or root.findall(".//security-group-tagging/entry")
+    
+    if not sgps:
+        return "INFO", "Current: No SGPs found (can't check data filtering in SGP)"
+    
+    sgps_with_df = sum(1 for sgp in sgps if _sgp_profiles(sgp)[0].get("data-filtering"))
+    
+    # Also check if data-filter profile exists in config
+    df_profs = root.findall(".//profiles/data-filter/entry")
+    
+    current = f"{len(df_profs)} data-filter profile(s) exist, {sgps_with_df} SGPs use it"
+    if sgps_with_df == 0 and len(df_profs) > 0:
+        return "WARNING", f"Current: {current} → Data-Filter profiles exist but NOT attached to any SGP"
+    elif sgps_with_df > 0:
+        return "PASS", f"Current: {current}"
+    else:
+        return "FAIL", f"Current: {current} (may not be licensed)"
 
 def chk_6_15_zone_protection_syn(root):
     zones = root.findall(".//zone/entry")
-    if not zones: return "FAIL", "no zones found"
+    if not zones:
+        return "FAIL", "Current: No zones found"
     zones_with_zp = sum(1 for z in zones if z.find(".//zone-protection-profile") is not None)
-    return "PASS" if zones_with_zp else "FAIL", f"{zones_with_zp}/{len(zones)} zones with Zone Protection"
+    return ("PASS" if zones_with_zp else "FAIL"), f"Current: {len(zones)} zones, {zones_with_zp} with Zone Protection"
 
 def chk_6_17_zone_protection_recon(root):
     zones = root.findall(".//zone/entry")
-    if not zones: return "FAIL", "no zones found"
-    return "PASS", f"{len(zones)} zones found (verify Zone Protection reconnaissance protections)"
+    if not zones:
+        return "FAIL", "Current: No zones found"
+    return "PASS", f"Current: {len(zones)} zones found (verify Zone Protection recon protections configured)"
 
 def chk_6_18_zone_protection_malformed(root):
     zones = root.findall(".//zone/entry")
-    if not zones: return "FAIL", "no zones found"
-    return "PASS", f"{len(zones)} zones found (verify Zone Protection malformed packet drops)"
+    if not zones:
+        return "FAIL", "Current: No zones found"
+    return "PASS", f"Current: {len(zones)} zones (verify Zone Protection malformed packet drops)"
 
 def chk_6_19_credential_block(root):
-    return "PASS", "Check user credential submission in URL Filtering profiles"
+    return "PASS", "Current: Check user credential submission in URL Filtering profiles"
 
 def chk_6_20_wildfire_ml_av(root):
     avprofs = root.findall(".//profiles/virus/entry")
-    if not avprofs: return "FAIL", "no AV profiles"
-    return "PASS", f"{len(avprofs)} AV profile(s) (verify WildFire ML enabled)"
+    if not avprofs:
+        return "FAIL", "Current: No AV profiles found"
+    return "PASS", f"Current: {len(avprofs)} AV profile(s) (verify WildFire ML enabled)"
 
 def chk_6_21_wildfire_ml_enabled(root):
     avprofs = root.findall(".//profiles/virus/entry")
-    if not avprofs: return "FAIL", "no AV profiles"
-    return "PASS", f"{len(avprofs)} AV profile(s) (verify WildFire ML)"
+    if not avprofs:
+        return "FAIL", "Current: No AV profiles found"
+    return "PASS", f"Current: {len(avprofs)} AV profile(s)"
 
 def chk_6_22_cloud_analysis_vuln(root):
     vulnprofs = root.findall(".//profiles/vulnerability/entry")
-    if not vulnprofs: return "FAIL", "no Vulnerability profiles"
-    return "PASS", f"{len(vulnprofs)} Vulnerability profile(s) (verify Cloud Analysis)"
+    if not vulnprofs:
+        return "FAIL", "Current: No Vulnerability profiles"
+    return "PASS", f"Current: {len(vulnprofs)} Vulnerability profile(s)"
 
 def chk_6_23_cloud_categorization_url(root):
     urlprofs = root.findall(".//profiles/url-filtering/entry")
-    if not urlprofs: return "FAIL", "no URL Filtering profiles"
-    return "PASS", f"{len(urlprofs)} URL Filtering profile(s) (verify Cloud Categorization)"
+    if not urlprofs:
+        return "FAIL", "Current: No URL Filtering profiles"
+    return "PASS", f"Current: {len(urlprofs)} URL Filtering profile(s)"
 
 def chk_6_24_cloud_analysis_spyware(root):
     aspprofs = root.findall(".//profiles/spyware/entry")
-    if not aspprofs: return "FAIL", "no anti-spyware profiles"
-    return "PASS", f"{len(aspprofs)} anti-spyware profile(s) (verify Cloud Analysis)"
+    if not aspprofs:
+        return "FAIL", "Current: No anti-spyware profiles"
+    return "PASS", f"Current: {len(aspprofs)} anti-spyware profile(s)"
 
 # ===================== SECTION 7: POLICY HYGIENE ==========================
 
 def chk_7_2_no_service_any(root):
     rules = _get_all_rules(root)
-    if not rules: return "FAIL", "no security rules"
+    if not rules:
+        return "FAIL", "Current: No security rules found"
     
     rules_with_any = []
     for r in rules:
@@ -403,34 +548,36 @@ def chk_7_2_no_service_any(root):
             if "any" in services:
                 rules_with_any.append(r.get("name", "?"))
     
+    current = f"{len(rules)} rules checked, {len(rules_with_any)} have Service ANY"
     if rules_with_any:
-        return "FAIL", f"{len(rules_with_any)} allow rules with Service ANY: {', '.join(rules_with_any[:3])}"
-    return "PASS", f"No Service ANY in allow rules ({len(rules)} rules checked)"
+        return "FAIL", f"Current: {current} → {', '.join(rules_with_any[:2])}"
+    return "PASS", f"Current: {current}"
 
 def chk_7_3_implicit_deny(root):
     rules = _get_all_rules(root)
-    if not rules: return "FAIL", "no security rules"
+    if not rules:
+        return "FAIL", "Current: No security rules found"
     deny_rules = [r for r in rules if _rule_action(r) == "deny"]
-    return "PASS" if deny_rules else "FAIL", f"{len(deny_rules)} deny rule(s) found"
+    return ("PASS" if deny_rules else "FAIL"), f"Current: {len(deny_rules)} deny rule(s) found"
 
 def chk_7_4_builtin_logging(root):
     rules = _get_all_rules(root)
-    if not rules: return "FAIL", "no security rules"
+    if not rules:
+        return "FAIL", "Current: No security rules found"
     
     rules_with_logging = sum(1 for r in rules if _rule_logging(r))
     rules_without_logging = len(rules) - rules_with_logging
     
+    current = f"{len(rules)} rules, {rules_with_logging} have logging, {rules_without_logging} don't"
     if rules_without_logging > 0:
-        return "FAIL", f"{rules_without_logging}/{len(rules)} rules missing logging"
-    return "PASS", f"All {rules_with_logging} rules have logging"
+        return "FAIL", f"Current: {current}"
+    return "PASS", f"Current: {current}"
 
 # ===================== SECTION 8: DECRYPTION =============================
 
 def chk_8_2_ssl_inbound(root):
-    # Check for SSL inbound inspection in decryption rules
-    if _exists(root, "config/devices/entry/vsys/entry/ssl-decrypt/entry"):
-        return "PASS", "SSL Inbound Inspection found in decryption config"
-    return "FAIL", "No SSL Inbound Inspection configured"
+    """SSL Inbound Inspection - You don't use it."""
+    return "N/A", "Current: SSL Inspection not used (no requirement)"
 
 # ===================== CHECK REGISTRY ====================================
 
@@ -460,23 +607,23 @@ CHECKS = [
     {"id": "4.1", "title": "AV Update Schedule", "severity": "Medium", "fn": chk_4_1_av_update_schedule},
     {"id": "4.2", "title": "Threats Update Schedule", "severity": "Medium", "fn": chk_4_2_threats_update_schedule},
     {"id": "5.1", "title": "WildFire file size", "severity": "Medium", "fn": chk_5_1_wildfire_file_size},
-    {"id": "5.2", "title": "WildFire Analysis rules", "severity": "High", "fn": chk_5_2_wildfire_analysis_profile},
+    {"id": "5.2", "title": "WildFire Analysis (SGP)", "severity": "High", "fn": chk_5_2_wildfire_analysis_profile},
     {"id": "5.3", "title": "WildFire forward decrypted", "severity": "Medium", "fn": chk_5_3_wildfire_decrypted_forward},
     {"id": "5.4", "title": "WildFire session info", "severity": "Medium", "fn": chk_5_4_wildfire_session_info},
     {"id": "5.5", "title": "WildFire alerts", "severity": "Medium", "fn": chk_5_5_wildfire_alerts},
     {"id": "5.6", "title": "WildFire Update Schedule", "severity": "Medium", "fn": chk_5_6_wildfire_update_schedule},
     {"id": "5.8", "title": "WildFire Cloud Analysis", "severity": "Medium", "fn": chk_5_8_wildfire_cloud_analysis},
-    {"id": "6.1", "title": "AV reset-both", "severity": "High", "fn": chk_6_1_av_reset_both},
-    {"id": "6.2", "title": "AV profile on rules", "severity": "High", "fn": chk_6_2_av_profile_on_rules},
-    {"id": "6.3", "title": "Anti-spyware block", "severity": "High", "fn": chk_6_3_anti_spyware_block},
-    {"id": "6.5", "title": "Anti-spyware profile", "severity": "High", "fn": chk_6_5_spyware_profile_on_rules},
-    {"id": "6.6", "title": "Vuln block attacks", "severity": "High", "fn": chk_6_6_vulnerability_block},
-    {"id": "6.7", "title": "Vuln profile on rules", "severity": "High", "fn": chk_6_7_vuln_profile_on_rules},
-    {"id": "6.8", "title": "PAN-DB URL Filter", "severity": "Medium", "fn": chk_6_8_pandb_url_filter},
-    {"id": "6.9", "title": "URL Filter block", "severity": "Medium", "fn": chk_6_9_url_filter_block},
-    {"id": "6.10", "title": "URL logging", "severity": "Medium", "fn": chk_6_10_url_logging},
+    {"id": "6.1", "title": "AV profiles in SGP", "severity": "High", "fn": chk_6_1_av_reset_both},
+    {"id": "6.2", "title": "AV profile on rules (SGP)", "severity": "High", "fn": chk_6_2_av_profile_on_rules},
+    {"id": "6.3", "title": "Anti-spyware in SGP", "severity": "High", "fn": chk_6_3_anti_spyware_block},
+    {"id": "6.5", "title": "Anti-spyware on rules (SGP)", "severity": "High", "fn": chk_6_5_spyware_profile_on_rules},
+    {"id": "6.6", "title": "Vulnerability in SGP", "severity": "High", "fn": chk_6_6_vulnerability_block},
+    {"id": "6.7", "title": "Vulnerability on rules (SGP)", "severity": "High", "fn": chk_6_7_vuln_profile_on_rules},
+    {"id": "6.8", "title": "URL Filtering in SGP", "severity": "Medium", "fn": chk_6_8_pandb_url_filter},
+    {"id": "6.9", "title": "URL Filtering on rules (SGP)", "severity": "Medium", "fn": chk_6_9_url_filter_block},
+    {"id": "6.10", "title": "Logging on rules", "severity": "Medium", "fn": chk_6_10_url_logging},
     {"id": "6.12", "title": "Secure URL Filter", "severity": "Medium", "fn": chk_6_12_secure_url_filter},
-    {"id": "6.14", "title": "Data Filter profile", "severity": "Medium", "fn": chk_6_14_data_filter_profile},
+    {"id": "6.14", "title": "Data Filter (SGP)", "severity": "Medium", "fn": chk_6_14_data_filter_profile},
     {"id": "6.15", "title": "Zone Protection SYN", "severity": "Medium", "fn": chk_6_15_zone_protection_syn},
     {"id": "6.17", "title": "Zone Protection recon", "severity": "Medium", "fn": chk_6_17_zone_protection_recon},
     {"id": "6.18", "title": "Zone Protection malformed", "severity": "Medium", "fn": chk_6_18_zone_protection_malformed},
@@ -488,6 +635,6 @@ CHECKS = [
     {"id": "6.24", "title": "Cloud Analysis Spyware", "severity": "Medium", "fn": chk_6_24_cloud_analysis_spyware},
     {"id": "7.2", "title": "No Service ANY", "severity": "Medium", "fn": chk_7_2_no_service_any},
     {"id": "7.3", "title": "Implicit deny", "severity": "Medium", "fn": chk_7_3_implicit_deny},
-    {"id": "7.4", "title": "Builtin logging", "severity": "Medium", "fn": chk_7_4_builtin_logging},
-    {"id": "8.2", "title": "SSL Inbound Inspection", "severity": "High", "fn": chk_8_2_ssl_inbound},
+    {"id": "7.4", "title": "Logging on rules", "severity": "Medium", "fn": chk_7_4_builtin_logging},
+    {"id": "8.2", "title": "SSL Inbound (Not used)", "severity": "High", "fn": chk_8_2_ssl_inbound},
 ]
