@@ -117,6 +117,37 @@ def get_device_config_via_panorama(host, apikey, serial, verify_tls=False):
 
 # ----------------------------- evaluation -----------------------------
 
+
+def load_exemptions(config_path="config_audit_exemptions.txt"):
+    """Load exempt/N/A controls from config file."""
+    exemptions = {}
+    if not os.path.isfile(config_path):
+        return exemptions
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" in line:
+                    ctrl, reason = line.split("=", 1)
+                    exemptions[ctrl.strip()] = reason.strip()
+    except Exception as e:
+        print(f"Warning: Could not load exemptions: {e}", file=sys.stderr)
+    return exemptions
+
+
+def apply_exemptions(rows, exemptions):
+    """Convert FAIL to N/A for exempt controls."""
+    for row in rows:
+        if row["id"] in exemptions:
+            if row["result"] in ["FAIL", "ERROR"]:
+                row["result"] = "N/A"
+                row["evidence"] = f"Not applicable - {exemptions[row['id']]}"
+    return rows
+
+
+
 def run_checks(config_root, device_label):
     rows = []
     for chk in CHECKS:
@@ -170,7 +201,7 @@ def _summary(rows):
 
 def write_csv(rows, out_dir, ts):
     p = os.path.join(out_dir, f"cis_panos_report_{ts}.csv")
-    with open(p, "w", newline="") as f:
+    with open(p, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=["device", "id", "title",
                            "severity", "result", "evidence"])
         w.writeheader()
@@ -184,7 +215,7 @@ def write_html(rows, out_dir, ts, meta):
     s = _summary(rows)
     devices = sorted({r["device"] for r in rows})
     color = {"PASS": "#1a7f37", "FAIL": "#cf222e",
-             "MANUAL": "#9a6700", "ERROR": "#8250df"}
+             "MANUAL": "#9a6700", "ERROR": "#8250df", "N/A": "#9a6700"}
     b = [f"""<!doctype html><html><head><meta charset="utf-8">
 <title>CIS PAN-OS Compliance Report {html.escape(ts)}</title><style>
  body{{font-family:-apple-system,Segoe UI,Roboto,sans-serif;margin:24px;color:#1c2128}}
@@ -218,7 +249,7 @@ def write_html(rows, out_dir, ts, meta):
              'Self-generated assessment tool. Validate check logic against the CIS '
              'PAN-OS benchmark PDF before relying on this as sole audit evidence.</p>'
              '</body></html>')
-    with open(p, "w") as f:
+    with open(p, "w", encoding="utf-8") as f:
         f.write("".join(b))
     return p
 
@@ -294,6 +325,13 @@ def main():
                                  "evidence": str(e)})
     else:
         ap.error("provide either --offline PATH or --target {panorama,firewall}")
+
+        
+    # Load and apply exemptions
+    exemptions = load_exemptions()
+    if exemptions:
+        all_rows = apply_exemptions(all_rows, exemptions)
+        print(f"[*] Applied {len(exemptions)} exemptions (N/A)")
 
     if not all_rows:
         raise SystemExit("No results produced.")
